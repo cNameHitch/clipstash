@@ -7,7 +7,6 @@ use core_graphics::event::{
     CGEventTapPlacement, CGEventTapProxy, CGEventType, EventField,
 };
 use core_graphics::event::CGEvent;
-use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use std::sync::Mutex;
 
 // ── HotkeyAction ──
@@ -259,15 +258,11 @@ fn event_tap_callback(
         if let Some(state) = guard.as_ref() {
             (state.callback)(action);
         }
-        // Return None to swallow the event so it doesn't propagate.
-        // Create a dummy event to replace the consumed keystroke. Returning
-        // Some(replacement) prevents the original key event from propagating.
-        if let Ok(source) = CGEventSource::new(CGEventSourceStateID::Private) {
-            if let Ok(dummy) = CGEvent::new(source) {
-                return Some(dummy);
-            }
-        }
-        // If we couldn't create a replacement, pass through the original.
+        // NOTE: We must NOT return Some(new_event) here. The core-graphics
+        // wrapper drops (CFRelease) the original event when Some is returned,
+        // but the system also tries to release it → double-free crash.
+        // Returning None passes the original event through, which is safe.
+        // The Cmd+Shift+<key> combo is unlikely to conflict with other apps.
         return None;
     }
 
@@ -282,20 +277,51 @@ extern "C" {
     fn AXIsProcessTrusted() -> bool;
 }
 
-/// Check whether the current process has accessibility (Trusted)
-/// permissions, which are required for CGEvent taps.
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFDictionaryCreate(
+        allocator: *const std::ffi::c_void,
+        keys: *const *const std::ffi::c_void,
+        values: *const *const std::ffi::c_void,
+        num_values: isize,
+        key_callbacks: *const std::ffi::c_void,
+        value_callbacks: *const std::ffi::c_void,
+    ) -> *const std::ffi::c_void;
+    fn CFRelease(cf: *const std::ffi::c_void);
+    static kCFBooleanTrue: *const std::ffi::c_void;
+    static kCFTypeDictionaryKeyCallBacks: u8;
+    static kCFTypeDictionaryValueCallBacks: u8;
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    static kAXTrustedCheckOptionPrompt: *const std::ffi::c_void;
+    fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+}
+
+/// Check whether the current process has accessibility permissions.
 pub fn has_accessibility_permission() -> bool {
-    // Safety: AXIsProcessTrusted is a simple query with no side effects.
     unsafe { AXIsProcessTrusted() }
 }
 
-/// Open System Preferences to the Privacy > Accessibility pane so the user
-/// can grant permission.
-pub fn request_accessibility_permission() {
-    use std::process::Command;
-    let _ = Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn();
+/// Prompt the user to grant Accessibility permissions via the system dialog,
+/// and return whether the process is currently trusted.
+pub fn request_accessibility_permission() -> bool {
+    unsafe {
+        let key = kAXTrustedCheckOptionPrompt;
+        let value = kCFBooleanTrue;
+        let dict = CFDictionaryCreate(
+            std::ptr::null(),
+            &key,
+            &value,
+            1,
+            &kCFTypeDictionaryKeyCallBacks as *const u8 as *const std::ffi::c_void,
+            &kCFTypeDictionaryValueCallBacks as *const u8 as *const std::ffi::c_void,
+        );
+        let result = AXIsProcessTrustedWithOptions(dict);
+        CFRelease(dict);
+        result
+    }
 }
 
 // ── HotkeyManager ──
@@ -329,13 +355,13 @@ impl HotkeyManager {
         config: &Config,
         callback: HotkeyCallback,
     ) -> Result<(), ClipStashError> {
-        // 1. Check accessibility permissions.
+        // 1. Check accessibility permissions. Use the prompt variant so
+        //    macOS shows its system dialog if not yet trusted.
         if !has_accessibility_permission() {
-            request_accessibility_permission();
-            return Err(ClipStashError::HotkeyError(
-                "accessibility permission not granted – cannot install event tap"
-                    .into(),
-            ));
+            let trusted = request_accessibility_permission();
+            if !trusted {
+                log::warn!("Accessibility not yet granted; will attempt tap anyway");
+            }
         }
 
         // 2. Parse hotkeys from config.
@@ -500,8 +526,8 @@ impl HotkeyManager {
         has_accessibility_permission()
     }
 
-    /// Convenience wrapper – opens the accessibility preferences pane.
-    pub fn request_accessibility_permission() {
+    /// Convenience wrapper – prompts for accessibility permission.
+    pub fn request_accessibility_permission() -> bool {
         request_accessibility_permission()
     }
 }
