@@ -1,0 +1,21 @@
+[package]
+name = "clipstash-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "clipstash"
+path = "src/main.rs"
+
+[dependencies]
+clipstash-types = { workspace = true }
+clipstash-store = { workspace = true }
+clipstash-pb = { workspace = true }
+clipstash-hotkey = { workspace = true }
+clipstash-ui = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+dirs = { workspace = true }
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-app-kit = { workspace = true }

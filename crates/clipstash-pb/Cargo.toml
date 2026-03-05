@@ -1,0 +1,12 @@
+[package]
+name = "clipstash-pb"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clipstash-types = { workspace = true }
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-app-kit = { workspace = true }
+log = { workspace = true }
+blake3 = { workspace = true }

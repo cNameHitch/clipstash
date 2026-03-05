@@ -1,0 +1,15 @@
+[package]
+name = "clipstash-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clipstash-types = { workspace = true }
+clipstash-store = { workspace = true }
+clipstash-hotkey = { workspace = true }
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-app-kit = { workspace = true }
+core-graphics = { workspace = true }
+core-graphics-types = { workspace = true }
+log = { workspace = true }

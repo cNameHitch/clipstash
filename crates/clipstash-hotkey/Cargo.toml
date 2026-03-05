@@ -1,0 +1,12 @@
+[package]
+name = "clipstash-hotkey"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clipstash-types = { workspace = true }
+core-graphics = { workspace = true }
+core-graphics-types = { workspace = true }
+core-foundation = { workspace = true }
+log = { workspace = true }
+bitflags = { workspace = true }

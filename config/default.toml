@@ -1,0 +1,13 @@
+capacity = 5
+poll_interval_ms = 250
+picker_hotkey = "cmd+shift+v"
+direct_slot_hotkeys = true
+cycle_forward_hotkey = "cmd+shift+]"
+cycle_backward_hotkey = "cmd+shift+["
+persist = true
+max_item_bytes = 52428800
+launch_at_login = false
+show_previews = true
+preview_length = 80
+sound_on_capture = false
+auto_paste = true
