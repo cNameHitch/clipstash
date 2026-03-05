@@ -123,10 +123,9 @@ fn main() {
     // 8. Set up event channel.
     let (tx, rx) = mpsc::channel::<AppEvent>();
 
-    // 9. Check accessibility permissions.
+    // 9. Check accessibility permissions (register() will also prompt).
     if !HotkeyManager::has_accessibility_permission() {
-        log::warn!("Accessibility permission not granted -- hotkeys will not work");
-        HotkeyManager::request_accessibility_permission();
+        log::warn!("Accessibility permission not yet granted");
     }
 
     // 10. Initialize and register HotkeyManager.
@@ -252,6 +251,27 @@ fn main() {
                 write_active_to_pasteboard(&store, &monitor);
                 let st = store.lock().unwrap();
                 ui.refresh(&st, &config);
+            }
+            Ok(AppEvent::Menu(MenuAction::OverlaySelect(n))) => {
+                log::debug!("Overlay: select slot {n}");
+                {
+                    let mut st = store.lock().unwrap();
+                    st.set_active(n);
+                }
+                write_active_to_pasteboard(&store, &monitor);
+                ui.overlay.hide();
+                let st = store.lock().unwrap();
+                ui.refresh(&st, &config);
+                if config.auto_paste {
+                    clipstash_ui::synthesize_paste();
+                }
+            }
+            Ok(AppEvent::Menu(MenuAction::OverlayNavigate)) => {
+                let st = store.lock().unwrap();
+                ui.overlay.show(&st, &config);
+            }
+            Ok(AppEvent::Menu(MenuAction::OverlayDismiss)) => {
+                ui.overlay.hide();
             }
             Ok(AppEvent::Menu(MenuAction::ClearHistory)) => {
                 log::info!("Menu: clear history");

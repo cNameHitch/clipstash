@@ -6,7 +6,8 @@ use objc2::rc::Retained;
 use objc2::runtime::NSObject;
 use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker};
 use objc2_app_kit::{
-    NSMenu, NSMenuItem, NSPanel, NSStatusBar, NSStatusItem, NSVisualEffectView,
+    NSApplication, NSEvent, NSMenu, NSMenuItem, NSPanel, NSStatusBar, NSStatusItem,
+    NSView, NSVisualEffectView,
 };
 use objc2_foundation::NSString;
 
@@ -115,6 +116,9 @@ pub enum MenuAction {
     SelectSlot(usize),
     ClearHistory,
     Quit,
+    OverlaySelect(usize),
+    OverlayNavigate,
+    OverlayDismiss,
 }
 
 type MenuCallback = Box<dyn Fn(MenuAction) + Send>;
@@ -132,6 +136,10 @@ fn dispatch_menu_action(action: MenuAction) {
         cb(action);
     }
 }
+
+// Overlay navigation state (global for CSOverlayView keyDown handler)
+static OVERLAY_SELECTED: Mutex<usize> = Mutex::new(0);
+static OVERLAY_COUNT: Mutex<usize> = Mutex::new(0);
 
 // ---------------------------------------------------------------------------
 // MenuHandler — Objective-C target for menu item actions
@@ -160,6 +168,58 @@ define_class!(
         fn quit_app(&self, _sender: &NSMenuItem) {
             log::debug!("Menu: quit");
             dispatch_menu_action(MenuAction::Quit);
+        }
+    }
+);
+
+// ---------------------------------------------------------------------------
+// CSOverlayView — key event handler for the overlay panel
+// ---------------------------------------------------------------------------
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[name = "CSOverlayView"]
+    pub struct OverlayView;
+
+    impl OverlayView {
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            let key_code = event.keyCode();
+            match key_code {
+                0x7E => {
+                    // Up arrow
+                    let count = *OVERLAY_COUNT.lock().unwrap();
+                    if count > 0 {
+                        let mut sel = OVERLAY_SELECTED.lock().unwrap();
+                        *sel = if *sel > 0 { *sel - 1 } else { count - 1 };
+                    }
+                    dispatch_menu_action(MenuAction::OverlayNavigate);
+                }
+                0x7D => {
+                    // Down arrow
+                    let count = *OVERLAY_COUNT.lock().unwrap();
+                    if count > 0 {
+                        let mut sel = OVERLAY_SELECTED.lock().unwrap();
+                        *sel = (*sel + 1) % count;
+                    }
+                    dispatch_menu_action(MenuAction::OverlayNavigate);
+                }
+                0x24 => {
+                    // Return — confirm selection
+                    let sel = *OVERLAY_SELECTED.lock().unwrap();
+                    dispatch_menu_action(MenuAction::OverlaySelect(sel));
+                }
+                0x35 => {
+                    // Escape — dismiss
+                    dispatch_menu_action(MenuAction::OverlayDismiss);
+                }
+                _ => {}
+            }
         }
     }
 );
@@ -371,12 +431,23 @@ impl OverlayController {
         let mtm = MainThreadMarker::new()
             .expect("OverlayController::show must be called from the main thread");
 
+        // Update overlay navigation state.
+        {
+            *OVERLAY_COUNT.lock().unwrap() = store.len();
+        }
+        // Only reset selection to active index on fresh open (not navigate refresh).
+        if !self.visible {
+            *OVERLAY_SELECTED.lock().unwrap() = store.active_index();
+        }
+        let selected_idx = *OVERLAY_SELECTED.lock().unwrap();
+        let active_idx = store.active_index();
+
         if let Some(ref panel) = self.panel {
             panel.orderOut(None);
         }
 
         let screen_frame = {
-            let mouse = objc2_app_kit::NSEvent::mouseLocation();
+            let mouse = NSEvent::mouseLocation();
             let screens = NSScreen::screens(mtm);
             let mut frame = NSRect::new(
                 objc2_foundation::NSPoint::new(0.0, 0.0),
@@ -408,9 +479,7 @@ impl OverlayController {
             objc2_foundation::NSSize::new(PANEL_WIDTH, PANEL_HEIGHT),
         );
 
-        let style = NSWindowStyleMask::Titled
-            | NSWindowStyleMask::Closable
-            | NSWindowStyleMask::NonactivatingPanel;
+        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
 
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             mtm.alloc::<NSPanel>(),
@@ -440,17 +509,22 @@ impl OverlayController {
 
         panel.setContentView(Some(&effect_view));
 
-        let active_idx = store.active_index();
+        // Add invisible key handler view for keyboard navigation.
+        let key_view: Retained<OverlayView> = unsafe {
+            msg_send![mtm.alloc::<OverlayView>(), initWithFrame: effect_frame]
+        };
+        effect_view.addSubview(&key_view);
+
         let mut y_offset = PANEL_HEIGHT - 50.0;
         let label_height = 24.0;
         let padding = 8.0;
 
-        let title_label = NSTextField::labelWithString(&ns_string("ClipStash"), mtm);
+        let title_label = NSTextField::labelWithString(&ns_string("ClipStash  (↑↓ navigate · ↵ select · esc close)"), mtm);
         title_label.setFrame(NSRect::new(
             objc2_foundation::NSPoint::new(16.0, y_offset),
             objc2_foundation::NSSize::new(PANEL_WIDTH - 32.0, 28.0),
         ));
-        let bold_font = NSFont::boldSystemFontOfSize(18.0);
+        let bold_font = NSFont::boldSystemFontOfSize(14.0);
         title_label.setFont(Some(&bold_font));
         title_label.setTextColor(Some(&NSColor::labelColor()));
         title_label.setDrawsBackground(false);
@@ -484,7 +558,7 @@ impl OverlayController {
 
                 let type_label = content_type_label(&clip_item.content);
                 let preview = preview_for_item(clip_item, config.preview_length);
-                let active_marker = if i == active_idx { " *" } else { "" };
+                let active_marker = if i == active_idx { " ●" } else { "" };
                 let display = format!(
                     "{}: [{}] {}{}",
                     i + 1, type_label, preview, active_marker,
@@ -495,16 +569,19 @@ impl OverlayController {
                     objc2_foundation::NSPoint::new(16.0, y_offset),
                     objc2_foundation::NSSize::new(PANEL_WIDTH - 32.0, label_height),
                 ));
-                let item_font = NSFont::systemFontOfSize(13.0);
-                label.setFont(Some(&item_font));
 
-                if i == active_idx {
-                    label.setTextColor(Some(&NSColor::controlAccentColor()));
+                if i == selected_idx {
+                    let bold = NSFont::boldSystemFontOfSize(13.0);
+                    label.setFont(Some(&bold));
+                    label.setDrawsBackground(true);
+                    label.setBackgroundColor(Some(&NSColor::controlAccentColor()));
                 } else {
-                    label.setTextColor(Some(&NSColor::labelColor()));
+                    let item_font = NSFont::systemFontOfSize(13.0);
+                    label.setFont(Some(&item_font));
+                    label.setDrawsBackground(false);
                 }
 
-                label.setDrawsBackground(false);
+                label.setTextColor(Some(&NSColor::labelColor()));
                 label.setBezeled(false);
                 label.setEditable(false);
                 label.setSelectable(false);
@@ -514,12 +591,19 @@ impl OverlayController {
             }
         }
 
+        // Activate the app so the panel can receive keyboard focus.
+        let ns_app = NSApplication::sharedApplication(mtm);
+        let _: () = unsafe { msg_send![&ns_app, activateIgnoringOtherApps: true] };
+
         panel.makeKeyAndOrderFront(None);
+
+        // Make the key handler view first responder.
+        let _: bool = unsafe { msg_send![&panel, makeFirstResponder: &*key_view] };
 
         self.panel = Some(panel);
         self.visible = true;
 
-        log::debug!("OverlayController: panel shown");
+        log::debug!("OverlayController: panel shown (selected={})", selected_idx);
     }
 
     pub fn hide(&mut self) {
